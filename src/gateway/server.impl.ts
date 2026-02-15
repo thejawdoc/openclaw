@@ -61,6 +61,7 @@ import { createChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
 import { createGatewayCloseHandler } from "./server-close.js";
 import { buildGatewayCronService } from "./server-cron.js";
+import { buildGatewayTaskSystem } from "./server-tasks.js";
 import { startGatewayDiscovery } from "./server-discovery-runtime.js";
 import { applyGatewayLaneConcurrency } from "./server-lanes.js";
 import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
@@ -426,6 +427,13 @@ export async function startGatewayServer(
     broadcast,
   });
   let { cron, storePath: cronStorePath } = cronState;
+
+  const taskEnabled = cfgAtStart.taskQueue?.enabled !== false;
+  if (taskEnabled) {
+    buildGatewayTaskSystem({ cfg: cfgAtStart, deps, broadcast, pluginRegistry }).catch((err) => {
+      log.error({ err: String(err) }, "task system initialization failed");
+    });
+  }
 
   const channelManager = createChannelManager({
     loadConfig,

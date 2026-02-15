@@ -663,6 +663,27 @@ export const OpenClawSchema = z
       })
       .strict()
       .optional(),
+    taskQueue: z.object({
+      enabled: z.boolean().optional(),
+      store: z.string().optional(),
+      pollIntervalMs: z.number().int().positive().optional(),
+      defaults: z.object({
+        timeout: z.number().int().positive().optional(),
+        maxTurns: z.number().int().positive().optional(),
+        checkpointInterval: z.number().int().positive().optional(),
+        requiresApproval: z.boolean().optional(),
+      }).strict().optional(),
+    }).strict().optional(),
+    api: z.object({
+      enabled: z.boolean().optional(),
+      auth: z.object({
+        writeToken: z.string().optional(),
+        requireTokenForWrites: z.boolean().optional(),
+      }).strict().optional(),
+      rateLimit: z.object({
+        maxPerMinute: z.number().int().positive().optional(),
+      }).strict().optional(),
+    }).strict().optional(),
   })
   .strict()
   .superRefine((cfg, ctx) => {

@@ -21,6 +21,9 @@ import { createSubagentsTool } from "./tools/subagents-tool.js";
 import { createTtsTool } from "./tools/tts-tool.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
+import { getTaskQueue, getTaskScheduler } from "../gateway/server-tasks.js";
+import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
+import { createTaskTools } from "./tools/task-tools.js";
 
 export function createOpenClawTools(options?: {
   sandboxBrowserBridgeUrl?: string;
@@ -183,5 +186,29 @@ export function createOpenClawTools(options?: {
     toolAllowlist: options?.pluginToolAllowlist,
   });
 
-  return [...tools, ...pluginTools];
+  // Task queue tools (non-blocking, graceful if task system not ready)
+  let taskTools: AnyAgentTool[] = [];
+  try {
+    const taskQueue = getTaskQueue();
+    const taskScheduler = getTaskScheduler();
+    if (taskQueue && taskScheduler) {
+      const agentId = resolveSessionAgentId({
+        sessionKey: options?.agentSessionKey,
+        config: options?.config,
+      });
+      taskTools = createTaskTools({
+        taskQueue,
+        agentSessionKey: options?.agentSessionKey,
+        config: options?.config,
+        requestHeartbeatNow: () => {
+          requestHeartbeatNow();
+          if (agentId) taskScheduler.wakeAgent(agentId);
+        },
+      });
+    }
+  } catch (_e) {
+    // Task system not initialized yet — skip
+  }
+
+  return [...tools, ...pluginTools, ...taskTools];
 }
