@@ -30,11 +30,71 @@ function resolveToCwd(filePath: string, cwd: string): string {
   return path.resolve(cwd, expanded);
 }
 
+/**
+ * A bind mount mapping from host path to container path.
+ * Parsed from Docker bind strings like "/host/path:/container/path:rw".
+ */
+export interface SandboxBindMount {
+  hostPath: string;
+  containerPath: string;
+  mode: string;
+}
+
+/**
+ * Parse Docker bind mount strings into structured objects.
+ * Format: "hostPath:containerPath:mode"
+ */
+export function parseBindMounts(binds?: string[]): SandboxBindMount[] {
+  if (!binds) {
+    return [];
+  }
+  const result: SandboxBindMount[] = [];
+  for (const bind of binds) {
+    const parts = bind.split(":");
+    if (parts.length >= 2) {
+      result.push({
+        hostPath: parts[0],
+        containerPath: parts[1],
+        mode: parts[2] ?? "ro",
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * Translate a container path to its host equivalent using bind mounts.
+ * Returns null if the path doesn't match any bind mount.
+ */
+function translateContainerPath(
+  filePath: string,
+  bindMounts: SandboxBindMount[],
+): { hostPath: string; bindRoot: string } | null {
+  const resolved = path.resolve(filePath);
+  const sorted = [...bindMounts].toSorted(
+    (a, b) => b.containerPath.length - a.containerPath.length,
+  );
+  for (const mount of sorted) {
+    const containerRoot = path.resolve(mount.containerPath);
+    if (resolved === containerRoot || resolved.startsWith(containerRoot + "/")) {
+      const relative = path.relative(containerRoot, resolved);
+      const hostResolved = relative ? path.join(mount.hostPath, relative) : mount.hostPath;
+      return { hostPath: hostResolved, bindRoot: mount.hostPath };
+    }
+  }
+  return null;
+}
+
 export function resolveSandboxInputPath(filePath: string, cwd: string): string {
   return resolveToCwd(filePath, cwd);
 }
 
-export function resolveSandboxPath(params: { filePath: string; cwd: string; root: string }): {
+export function resolveSandboxPath(params: {
+  filePath: string;
+  cwd: string;
+  root: string;
+  bindMounts?: SandboxBindMount[];
+}): {
   resolved: string;
   relative: string;
 } {
@@ -45,6 +105,13 @@ export function resolveSandboxPath(params: { filePath: string; cwd: string; root
     return { resolved, relative: "" };
   }
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    if (params.bindMounts && params.bindMounts.length > 0) {
+      const translated = translateContainerPath(resolved, params.bindMounts);
+      if (translated) {
+        const bindRelative = path.relative(translated.bindRoot, translated.hostPath);
+        return { resolved: translated.hostPath, relative: bindRelative || "" };
+      }
+    }
     throw new Error(`Path escapes sandbox root (${shortPath(rootResolved)}): ${params.filePath}`);
   }
   return { resolved, relative };
@@ -55,11 +122,26 @@ export async function assertSandboxPath(params: {
   cwd: string;
   root: string;
   allowFinalSymlink?: boolean;
+  bindMounts?: SandboxBindMount[];
 }) {
   const resolved = resolveSandboxPath(params);
-  await assertNoSymlinkEscape(resolved.relative, path.resolve(params.root), {
-    allowFinalSymlink: params.allowFinalSymlink,
-  });
+  const rootResolved = path.resolve(params.root);
+  const isUnderWorkspace =
+    resolved.resolved === rootResolved || resolved.resolved.startsWith(rootResolved + path.sep);
+  if (isUnderWorkspace) {
+    await assertNoSymlinkEscape(resolved.relative, rootResolved, {
+      allowFinalSymlink: params.allowFinalSymlink,
+    });
+  } else if (params.bindMounts) {
+    const translated = translateContainerPath(
+      resolveToCwd(params.filePath, params.cwd),
+      params.bindMounts,
+    );
+    if (translated) {
+      const rel = path.relative(translated.bindRoot, translated.hostPath);
+      await assertNoSymlinkEscape(rel || "", translated.bindRoot);
+    }
+  }
   return resolved;
 }
 
