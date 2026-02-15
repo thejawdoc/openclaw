@@ -1,6 +1,7 @@
+import type { FinalizedMsgContext, MsgContext } from "../templating.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { resolveConversationLabel } from "../../channels/conversation-label.js";
-import type { FinalizedMsgContext, MsgContext } from "../templating.js";
+import { sanitizeUntrustedContent } from "../../security/inbound-sanitizer.js";
 import { normalizeInboundTextNewlines } from "./inbound-text.js";
 
 export type FinalizeInboundContextOptions = {
@@ -52,7 +53,10 @@ export function finalizeInboundContext<T extends Record<string, unknown>>(
     const normalizedUntrusted = normalized.UntrustedContext.map((entry) =>
       normalizeInboundTextNewlines(entry),
     ).filter((entry) => Boolean(entry));
-    normalized.UntrustedContext = normalizedUntrusted;
+    // Hard-gate: sanitize untrusted entries before they reach agent context
+    normalized.UntrustedContext = normalizedUntrusted.map(
+      (entry) => sanitizeUntrustedContent(entry, "channel_metadata").sanitized,
+    );
   }
 
   const chatType = normalizeChatType(normalized.ChatType);

@@ -10,6 +10,8 @@ import { randomBytes } from "node:crypto";
  * system prompts or treated as trusted instructions.
  */
 
+import { sanitizeUntrustedContent } from "./inbound-sanitizer.js";
+
 /**
  * Patterns that may indicate prompt injection attempts.
  * These are logged for monitoring but content is still processed (wrapped safely).
@@ -219,7 +221,8 @@ export type WrapExternalContentOptions = {
 export function wrapExternalContent(content: string, options: WrapExternalContentOptions): string {
   const { source, sender, subject, includeWarning = true } = options;
 
-  const sanitized = replaceMarkers(content);
+  const markerCleaned = replaceMarkers(content);
+  const { sanitized: injectionCleaned } = sanitizeUntrustedContent(markerCleaned, source);
   const sourceLabel = EXTERNAL_SOURCE_LABELS[source] ?? "External";
   const metadataLines: string[] = [`Source: ${sourceLabel}`];
 
@@ -239,7 +242,7 @@ export function wrapExternalContent(content: string, options: WrapExternalConten
     createExternalContentStartMarker(markerId),
     metadata,
     "---",
-    sanitized,
+    injectionCleaned,
     createExternalContentEndMarker(markerId),
   ].join("\n");
 }
