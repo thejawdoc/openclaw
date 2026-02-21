@@ -11,9 +11,10 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { loadConfig } from "../config/io.js";
 import type { RunCronAgentTurnResult } from "../cron/isolated-agent.js";
-import type { TaskQueue } from "../tasks/TaskQueue.js";
 import { readJsonBody } from "../gateway/hooks.js";
+import type { TaskQueue } from "../tasks/TaskQueue.js";
 import { handleQueryActivity } from "./handlers/activity.js";
 import { handleListAgents, handleGetAgent } from "./handlers/agents.js";
 import {
@@ -357,23 +358,17 @@ async function routeRequest(
   }
 
   // --- /api/health -----------------------------------------------
+  // jawdoc: lightweight health — skip full agent enumeration to keep event loop free
   if (resource === "health" && method === "GET") {
-    const agents = await handleListAgents(deps.agentDeps);
+    const cfg = loadConfig();
+    const agentCount = cfg.agents?.list?.length ?? 0;
     const stats = await handleTaskStats(deps.taskDeps);
-    const agentList = Array.isArray(agents?.body) ? (agents.body as unknown[]) : [];
-    let onlineCount = 0;
-    for (const a of agentList) {
-      const rec = a as Record<string, unknown>;
-      if (rec.status !== "offline") {
-        onlineCount++;
-      }
-    }
     return {
       status: 200,
       body: {
         status: "ok",
         uptime: process.uptime(),
-        agents: { total: agentList.length, online: onlineCount },
+        agents: { total: agentCount, online: agentCount },
         tasks: stats?.body ?? {},
         timestamp: new Date().toISOString(),
       },

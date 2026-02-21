@@ -21,11 +21,11 @@
  *   3. requestHeartbeatNow() still works as a general wake signal
  */
 
-import type { TaskRunner } from "./TaskRunner.js";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { TaskQueue } from "./TaskQueue.js";
+import type { TaskRunner } from "./TaskRunner.js";
 
 export type TaskSchedulerDeps = {
   taskRunner: TaskRunner;
@@ -92,7 +92,7 @@ export class TaskScheduler {
     this.deps.log.info({ intervalMs: this.intervalMs }, "task-scheduler: started");
 
     // Initial check on startup (after a short delay to let gateway finish init)
-    setTimeout(() => this.tick(), 2000);
+    setTimeout(() => this.tick(), 120_000); // jawdoc: delay initial sweep to unblock HTTP
 
     this.timer = setInterval(() => this.tick(), this.intervalMs);
     this.timer.unref?.(); // Don't prevent process exit
@@ -215,10 +215,7 @@ export class TaskScheduler {
           );
         }
       } catch (err) {
-        this.deps.log.error(
-          { err: String(err) },
-          "task-scheduler: auto-archive failed",
-        );
+        this.deps.log.error({ err: String(err) }, "task-scheduler: auto-archive failed");
       }
 
       // 2. Validate output files for completed/approved tasks
@@ -254,29 +251,20 @@ export class TaskScheduler {
           }
         }
       } catch (err) {
-        this.deps.log.error(
-          { err: String(err) },
-          "task-scheduler: output validation failed",
-        );
+        this.deps.log.error({ err: String(err) }, "task-scheduler: output validation failed");
       }
       // 3. Morning brief — run once daily after 6 AM
       try {
         await this.morningBriefCheck();
       } catch (err) {
-        this.deps.log.error(
-          { err: String(err) },
-          "task-scheduler: morning brief failed",
-        );
+        this.deps.log.error({ err: String(err) }, "task-scheduler: morning brief failed");
       }
 
       // 4. Suggestion generation — cross-vertical analysis (F4)
       try {
         await this.generateSuggestions();
       } catch (err) {
-        this.deps.log.error(
-          { err: String(err) },
-          "task-scheduler: suggestion generation failed",
-        );
+        this.deps.log.error({ err: String(err) }, "task-scheduler: suggestion generation failed");
       }
     } finally {
       this.maintenanceRunning = false;
@@ -303,9 +291,7 @@ export class TaskScheduler {
 
     // Get recent failures (last 24h)
     const recentFailed = tasks.filter(
-      (t) =>
-        t.status === "failed" &&
-        now - new Date(t.dispatchedAt).getTime() < ONE_DAY,
+      (t) => t.status === "failed" && now - new Date(t.dispatchedAt).getTime() < ONE_DAY,
     );
 
     // Get existing pending suggestions to avoid duplicates
@@ -402,10 +388,14 @@ export class TaskScheduler {
     const todayStr = now.toISOString().slice(0, 10);
 
     // Already sent today?
-    if (this.lastBriefDate === todayStr) return;
+    if (this.lastBriefDate === todayStr) {
+      return;
+    }
 
     // Only after 6 AM
-    if (now.getHours() < 6) return;
+    if (now.getHours() < 6) {
+      return;
+    }
 
     const yesterday = new Date(now.getTime() - 86_400_000);
     const yesterdayStr = yesterday.toISOString().slice(0, 10);
@@ -423,24 +413,30 @@ export class TaskScheduler {
     }
 
     // Parse and aggregate
-    let created = 0, completed = 0, failed = 0, statusChanges = 0;
-    let totalInputTokens = 0, totalOutputTokens = 0;
+    let created = 0,
+      completed = 0,
+      failed = 0,
+      statusChanges = 0;
+    let totalInputTokens = 0,
+      totalOutputTokens = 0;
     const agentActivity: Record<string, number> = {};
 
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
-        if (entry.action === "task_created") created++;
-        else if (entry.action === "task_completed") {
+        if (entry.action === "task_created") {
+          created++;
+        } else if (entry.action === "task_completed") {
           completed++;
           if (entry.tokensSummary) {
             totalInputTokens += entry.tokensSummary.input ?? 0;
             totalOutputTokens += entry.tokensSummary.output ?? 0;
           }
-        }
-        else if (entry.action === "status_change") {
+        } else if (entry.action === "status_change") {
           statusChanges++;
-          if (entry.to === "failed") failed++;
+          if (entry.to === "failed") {
+            failed++;
+          }
         }
         if (entry.agent) {
           agentActivity[entry.agent] = (agentActivity[entry.agent] ?? 0) + 1;
@@ -465,8 +461,12 @@ export class TaskScheduler {
         `Daily Brief for ${yesterdayStr}:`,
         `  ${created} tasks created, ${completed} completed, ${failed} failed`,
         `  ${lines.length} total events across ${Object.keys(agentActivity).length} agents`,
-        totalInputTokens > 0 ? `  Tokens: ${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out` : "",
-      ].filter(Boolean).join("\n"),
+        totalInputTokens > 0
+          ? `  Tokens: ${totalInputTokens.toLocaleString()} in / ${totalOutputTokens.toLocaleString()} out`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
     };
 
     this.deps.broadcast("daily:brief", brief, { dropIfSlow: true });

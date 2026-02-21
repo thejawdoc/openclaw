@@ -159,9 +159,12 @@ export async function startGatewaySidecars(params: {
     params.log.warn(`plugin services failed to start: ${String(err)}`);
   }
 
-  void startGatewayMemoryBackend({ cfg: params.cfg, log: params.log }).catch((err) => {
-    params.log.warn(`qmd memory startup initialization failed: ${String(err)}`);
-  });
+  // jawdoc: defer QMD memory init by 3 min to unblock HTTP event loop on startup
+  setTimeout(() => {
+    void startGatewayMemoryBackend({ cfg: params.cfg, log: params.log }).catch((err) => {
+      params.log.warn(`qmd memory startup initialization failed: ${String(err)}`);
+    });
+  }, 180_000);
 
   if (shouldWakeFromRestartSentinel()) {
     setTimeout(() => {
