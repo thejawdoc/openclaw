@@ -139,7 +139,11 @@ export async function buildGatewayTaskSystem(params: {
   // Register API router as plugin HTTP handler
   if (pluginRegistry) {
     const writeToken =
-      typeof cfg.api?.auth?.writeToken === "string" ? cfg.api.auth.writeToken : undefined;
+      typeof cfg.api?.auth?.writeToken === "string"
+        ? cfg.api.auth.writeToken
+        : typeof cfg.gateway?.auth?.token === "string"
+          ? cfg.gateway.auth.token
+          : process.env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined;
 
     // Chat: wrap runCronIsolatedAgentTurn for the /api/chat endpoint
     const runAgentTurn = async (chatParams: {
