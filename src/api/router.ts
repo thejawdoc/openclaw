@@ -60,6 +60,42 @@ function isRateLimited(): boolean {
   return false;
 }
 
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) {
+    return false;
+  }
+  const normalized = address.trim().toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "::ffff:127.0.0.1" ||
+    normalized === "localhost"
+  );
+}
+
+function hasValidWriteToken(req: IncomingMessage, writeToken: string | undefined): boolean {
+  if (!writeToken) {
+    return false;
+  }
+  const providedToken = req.headers["x-mc-token"];
+  return typeof providedToken === "string" && providedToken === writeToken;
+}
+
+function isTrustedControlPlaneRequest(
+  req: IncomingMessage,
+  pathname: string,
+  writeToken: string | undefined,
+): boolean {
+  const remoteAddress = req.socket?.remoteAddress;
+  if (!isLoopbackAddress(remoteAddress)) {
+    return false;
+  }
+  if (req.method === "GET" && pathname === "/api/health") {
+    return true;
+  }
+  return hasValidWriteToken(req, writeToken);
+}
+
 // ─── CORS ────────────────────────────────────────────────────────
 
 function resolveCorsOrigin(req: IncomingMessage): string {
@@ -141,7 +177,7 @@ export function createApiRouter(deps: ApiRouterDeps) {
     }
 
     // Rate limiting
-    if (isRateLimited()) {
+    if (!isTrustedControlPlaneRequest(req, pathname, writeToken) && isRateLimited()) {
       sendJson(res, 429, { error: "Rate limit exceeded. Max 100 requests per minute." }, origin);
       return true;
     }
@@ -149,8 +185,7 @@ export function createApiRouter(deps: ApiRouterDeps) {
     // Write auth check for mutating methods
     const isWrite = req.method === "POST" || req.method === "PATCH" || req.method === "PUT";
     if (isWrite && writeToken) {
-      const providedToken = req.headers["x-mc-token"] as string | undefined;
-      if (providedToken !== writeToken) {
+      if (!hasValidWriteToken(req, writeToken)) {
         sendJson(res, 401, { error: "Missing or invalid X-MC-Token header" }, origin);
         return true;
       }
