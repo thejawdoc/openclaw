@@ -317,7 +317,7 @@ async function routeRequest(
   // ─── /api/agents ───────────────────────────────────────────
   if (resource === "agents") {
     if (!id && method === "GET") {
-      return handleListAgents(deps.agentDeps);
+      return handleListAgents(deps.agentDeps, query);
     }
     if (id && method === "GET") {
       return handleGetAgent(deps.agentDeps, id);

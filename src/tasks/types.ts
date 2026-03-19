@@ -261,6 +261,7 @@ export interface TaskListQuery {
 export interface AgentStatusResponse {
   id: string;
   status: "idle" | "working" | "blocked" | "offline";
+  blocked?: boolean;
   currentTask?: {
     id: string;
     title: string;
@@ -278,6 +279,14 @@ export interface AgentStatusResponse {
     thisWeek: number;
     thisMonth: number;
   };
+  recentActivity?: AgentRecentActivityItem[];
+}
+
+export interface AgentRecentActivityItem {
+  timestamp: string;
+  action: string;
+  label: string;
+  taskId?: string;
 }
 
 export interface CostSummary {

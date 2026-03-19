@@ -19,6 +19,7 @@ import { promises as fs } from "node:fs";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { invalidateAgentSummaryCache } from "./agent-summary.js";
 import type {
   TaskDefinition,
   TaskComment,
@@ -853,6 +854,7 @@ export class TaskQueue {
 
   private async writeTask(task: TaskDefinition): Promise<void> {
     await fs.writeFile(this.taskPath(task.id), JSON.stringify(task, null, 2));
+    invalidateAgentSummaryCache();
   }
 
   private async appendQueue(event: Record<string, unknown>): Promise<void> {
