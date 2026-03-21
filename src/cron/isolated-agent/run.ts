@@ -22,7 +22,7 @@ import {
   isCliProvider,
   normalizeModelSelection,
   resolveAllowedModelRef,
-  resolveConfiguredModelRef,
+  resolveDefaultModelForAgent,
   resolveHooksGmailModel,
   resolveThinkingDefault,
 } from "../../agents/model-selection.js";
@@ -235,10 +235,9 @@ export async function runCronIsolatedAgentTurn(params: {
   });
   const workspaceDir = workspace.dir;
 
-  const resolvedDefault = resolveConfiguredModelRef({
-    cfg: cfgWithAgentDefaults,
-    defaultProvider: DEFAULT_PROVIDER,
-    defaultModel: DEFAULT_MODEL,
+  const resolvedDefault = resolveDefaultModelForAgent({
+    cfg: params.cfg,
+    agentId,
   });
   let provider = resolvedDefault.provider;
   let model = resolvedDefault.model;

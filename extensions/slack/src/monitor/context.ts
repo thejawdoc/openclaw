@@ -366,6 +366,7 @@ export function createSlackMonitorContext(params: {
       api_app_id?: unknown;
       team_id?: unknown;
       team?: { id?: unknown };
+      event?: { type?: unknown; user?: unknown };
     };
     const incomingApiAppId = typeof raw.api_app_id === "string" ? raw.api_app_id : "";
     const incomingTeamId =
@@ -374,12 +375,23 @@ export function createSlackMonitorContext(params: {
         : typeof raw.team?.id === "string"
           ? raw.team.id
           : "";
+    const eventType = typeof raw.event?.type === "string" ? raw.event.type : "";
+    const eventUser = typeof raw.event?.user === "string" ? raw.event.user : "";
+    const isHumanAuthoredInbound =
+      (eventType === "message" || eventType === "app_mention") && eventUser.length > 0;
 
     if (params.apiAppId && incomingApiAppId && incomingApiAppId !== params.apiAppId) {
-      logVerbose(
-        `slack: drop event with api_app_id=${incomingApiAppId} (expected ${params.apiAppId})`,
-      );
-      return true;
+      if (isHumanAuthoredInbound) {
+        logVerbose(
+          `slack: allow human-authored ${eventType} event with api_app_id=${incomingApiAppId} ` +
+            `(expected ${params.apiAppId})`,
+        );
+      } else {
+        logVerbose(
+          `slack: drop event with api_app_id=${incomingApiAppId} (expected ${params.apiAppId})`,
+        );
+        return true;
+      }
     }
     if (params.teamId && incomingTeamId && incomingTeamId !== params.teamId) {
       logVerbose(`slack: drop event with team_id=${incomingTeamId} (expected ${params.teamId})`);

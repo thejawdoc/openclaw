@@ -277,6 +277,38 @@ describe("monitorSlackProvider tool results", () => {
     expect(replyMock).not.toHaveBeenCalled();
   });
 
+  it("allows human-authored message events even when api_app_id differs", async () => {
+    const client = getSlackClient();
+    if (!client) {
+      throw new Error("Slack client not registered");
+    }
+    (client.auth as { test: ReturnType<typeof vi.fn> }).test.mockResolvedValue({
+      user_id: "bot-user",
+      team_id: "T1",
+      api_app_id: "A1",
+    });
+    replyMock.mockResolvedValue({ text: "handled" });
+
+    await runSlackMessageOnce(
+      monitorSlackProvider,
+      {
+        body: {
+          api_app_id: "A2",
+          team_id: "T1",
+          event: {
+            type: "message",
+            user: "U1",
+          },
+        },
+        event: makeSlackMessageEvent(),
+      },
+      { appToken: "xapp-1-A1-abc" },
+    );
+
+    expect(replyMock).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not derive responsePrefix from routed agent identity when unset", async () => {
     slackTestState.config = {
       agents: {

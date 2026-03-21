@@ -6,6 +6,7 @@ import {
 } from "openclaw/plugin-sdk/reply-payload";
 import {
   resolveAgentConfig,
+  resolveAgentModelPrimary,
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
 } from "../agents/agent-scope.js";
@@ -705,7 +706,12 @@ export async function runHeartbeatOnce(opts: {
       agentId,
     });
 
-    const heartbeatModelOverride = heartbeat?.model?.trim() || undefined;
+    const explicitHeartbeatModel = resolveAgentConfig(cfg, agentId)?.heartbeat?.model?.trim();
+    const heartbeatModelOverride =
+      explicitHeartbeatModel ||
+      resolveAgentModelPrimary(cfg, agentId)?.trim() ||
+      cfg.agents?.defaults?.heartbeat?.model?.trim() ||
+      undefined;
     const suppressToolErrorWarnings = heartbeat?.suppressToolErrorWarnings === true;
     const bootstrapContextMode: "lightweight" | undefined =
       heartbeat?.lightContext === true ? "lightweight" : undefined;
