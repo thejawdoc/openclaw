@@ -17,7 +17,7 @@ Status: external CLI integration. Gateway talks to `signal-cli` over HTTP JSON-R
 - A phone number that can receive one verification SMS (for SMS registration path).
 - Browser access for Signal captcha (`signalcaptchas.org`) during registration.
 
-## Onboarding
+## Quick setup (beginner)
 
 1. Use a **separate Signal number** for the bot (recommended).
 2. Install `signal-cli` (Java required if you use the JVM build).
@@ -76,7 +76,7 @@ Disable with:
 - If you run the bot on **your personal Signal account**, it will ignore your own messages (loop protection).
 - For "I text the bot and it replies," use a **separate bot number**.
 
-## Onboarding (option A): link existing Signal account (QR)
+## Setup path A: link existing Signal account (QR)
 
 1. Install `signal-cli` (JVM or native build).
 2. Link a bot account:
@@ -99,9 +99,9 @@ Example:
 }
 ```
 
-Multi-account support: use `channels.signal.accounts` with per-account config and optional `name`. See [`gateway/configuration`](/gateway/configuration#telegramaccounts--discordaccounts--slackaccounts--signalaccounts--imessageaccounts) for the shared pattern.
+Multi-account support: use `channels.signal.accounts` with per-account config and optional `name`. See [`gateway/configuration`](/gateway/configuration-reference#multi-account-all-channels) for the shared pattern.
 
-## Onboarding (option B): register dedicated bot number (SMS, Linux)
+## Setup path B: register dedicated bot number (SMS, Linux)
 
 Use this when you want a dedicated bot number instead of linking an existing Signal app account.
 
@@ -195,6 +195,9 @@ Groups:
 
 - `channels.signal.groupPolicy = open | allowlist | disabled`.
 - `channels.signal.groupAllowFrom` controls who can trigger in groups when `allowlist` is set.
+- `channels.signal.groups["<group-id>" | "*"]` can override group behavior with `requireMention`, `tools`, and `toolsBySender`.
+- Use `channels.signal.accounts.<id>.groups` for per-account overrides in multi-account setups.
+- Runtime note: if `channels.signal` is completely missing, runtime falls back to `groupPolicy="allowlist"` for group checks (even if `channels.defaults.groupPolicy` is set).
 
 ## How it works (behavior)
 
@@ -290,7 +293,7 @@ For triage flow: [/channels/troubleshooting](/channels/troubleshooting).
 - Keep `channels.signal.dmPolicy: "pairing"` unless you explicitly want broader DM access.
 - SMS verification is only needed for registration or recovery flows, but losing control of the number/account can complicate re-registration.
 
-## Configuration
+## Configuration reference (Signal)
 
 Full configuration: [Configuration](/gateway/configuration)
 
@@ -311,6 +314,8 @@ Provider options:
 - `channels.signal.allowFrom`: DM allowlist (E.164 or `uuid:<id>`). `open` requires `"*"`. Signal has no usernames; use phone/UUID ids.
 - `channels.signal.groupPolicy`: `open | allowlist | disabled` (default: allowlist).
 - `channels.signal.groupAllowFrom`: group sender allowlist.
+- `channels.signal.groups`: per-group overrides keyed by Signal group id (or `"*"`). Supported fields: `requireMention`, `tools`, `toolsBySender`.
+- `channels.signal.accounts.<id>.groups`: per-account version of `channels.signal.groups` for multi-account setups.
 - `channels.signal.historyLimit`: max group messages to include as context (0 disables).
 - `channels.signal.dmHistoryLimit`: DM history limit in user turns. Per-user overrides: `channels.signal.dms["<phone_or_uuid>"].historyLimit`.
 - `channels.signal.textChunkLimit`: outbound chunk size (chars).

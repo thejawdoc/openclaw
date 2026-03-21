@@ -2,9 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../config/config.js";
 import { registerAgentRunContext, resetAgentRunContextForTest } from "../infra/agent-events.js";
 import { resolveHeartbeatVisibility } from "../infra/heartbeat-visibility.js";
+
+const persistGatewaySessionLifecycleEventMock = vi.fn();
+
+vi.mock("./session-lifecycle-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./session-lifecycle-state.js")>();
+  return {
+    ...actual,
+    persistGatewaySessionLifecycleEvent: (...args: unknown[]) =>
+      persistGatewaySessionLifecycleEventMock(...args),
+  };
+});
+
 import {
   createAgentEventHandler,
   createChatRunState,
+  createSessionEventSubscriberRegistry,
   createToolEventRecipientRegistry,
 } from "./server-chat.js";
 
@@ -28,6 +41,7 @@ describe("agent event handler", () => {
       showAlerts: true,
       useIndicator: true,
     });
+    persistGatewaySessionLifecycleEventMock.mockReset().mockResolvedValue(undefined);
     resetAgentRunContextForTest();
   });
 
@@ -47,6 +61,7 @@ describe("agent event handler", () => {
     const agentRunSeq = new Map<string, number>();
     const chatRunState = createChatRunState();
     const toolEventRecipients = createToolEventRecipientRegistry();
+    const sessionEventSubscribers = createSessionEventSubscriberRegistry();
 
     const handler = createAgentEventHandler({
       broadcast,
@@ -57,6 +72,7 @@ describe("agent event handler", () => {
       resolveSessionKeyForRun: params?.resolveSessionKeyForRun ?? (() => undefined),
       clearAgentRunContext: vi.fn(),
       toolEventRecipients,
+      sessionEventSubscribers,
     });
 
     return {
@@ -67,6 +83,7 @@ describe("agent event handler", () => {
       agentRunSeq,
       chatRunState,
       toolEventRecipients,
+      sessionEventSubscribers,
       handler,
     };
   }
@@ -97,6 +114,66 @@ describe("agent event handler", () => {
     return nodeSendToSession.mock.calls.filter(([, event]) => event === "chat");
   }
 
+  const FALLBACK_LIFECYCLE_DATA = {
+    phase: "fallback",
+    selectedProvider: "fireworks",
+    selectedModel: "fireworks/minimax-m2p5",
+    activeProvider: "deepinfra",
+    activeModel: "moonshotai/Kimi-K2.5",
+  } as const;
+
+  function emitLifecycleEnd(
+    handler: ReturnType<typeof createHarness>["handler"],
+    runId: string,
+    seq = 2,
+  ) {
+    handler({
+      runId,
+      seq,
+      stream: "lifecycle",
+      ts: Date.now(),
+      data: { phase: "end" },
+    });
+  }
+
+  function emitFallbackLifecycle(params: {
+    handler: ReturnType<typeof createHarness>["handler"];
+    runId: string;
+    seq?: number;
+    sessionKey?: string;
+  }) {
+    params.handler({
+      runId: params.runId,
+      seq: params.seq ?? 1,
+      stream: "lifecycle",
+      ts: Date.now(),
+      ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+      data: { ...FALLBACK_LIFECYCLE_DATA },
+    });
+  }
+
+  function expectSingleAgentBroadcastPayload(broadcast: ReturnType<typeof vi.fn>) {
+    const broadcastAgentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
+    expect(broadcastAgentCalls).toHaveLength(1);
+    return broadcastAgentCalls[0]?.[1] as {
+      runId?: string;
+      sessionKey?: string;
+      stream?: string;
+      data?: Record<string, unknown>;
+    };
+  }
+
+  function expectSingleFinalChatPayload(broadcast: ReturnType<typeof vi.fn>) {
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(1);
+    const payload = chatCalls[0]?.[1] as {
+      state?: string;
+      message?: unknown;
+    };
+    expect(payload.state).toBe("final");
+    return payload;
+  }
+
   it("emits chat delta for assistant text-only events", () => {
     const { broadcast, nodeSendToSession, nowSpy } = emitRun1AssistantText(
       createHarness({ now: 1_000 }),
@@ -110,6 +187,21 @@ describe("agent event handler", () => {
     };
     expect(payload.state).toBe("delta");
     expect(payload.message?.content?.[0]?.text).toBe("Hello world");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
+    nowSpy?.mockRestore();
+  });
+
+  it("strips inline directives from assistant chat events", () => {
+    const { broadcast, nodeSendToSession, nowSpy } = emitRun1AssistantText(
+      createHarness({ now: 1_000 }),
+      "Hello [[reply_to_current]] world [[audio_as_voice]]",
+    );
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(1);
+    const payload = chatCalls[0]?.[1] as {
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(payload.message?.content?.[0]?.text).toBe("Hello  world ");
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy?.mockRestore();
   });
@@ -137,21 +229,233 @@ describe("agent event handler", () => {
       ts: Date.now(),
       data: { text: "NO_REPLY" },
     });
-    handler({
-      runId: "run-2",
-      seq: 2,
-      stream: "lifecycle",
-      ts: Date.now(),
-      data: { phase: "end" },
-    });
+    emitLifecycleEnd(handler, "run-2");
 
-    const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(1);
-    const payload = chatCalls[0]?.[1] as { state?: string; message?: unknown };
-    expect(payload.state).toBe("final");
+    const payload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
     expect(payload.message).toBeUndefined();
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
     nowSpy?.mockRestore();
+  });
+
+  it("suppresses NO_REPLY lead fragments and does not leak NO in final chat message", () => {
+    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+      now: 2_100,
+    });
+    chatRunState.registry.add("run-3", { sessionKey: "session-3", clientRunId: "client-3" });
+
+    for (const text of ["NO", "NO_", "NO_RE", "NO_REPLY"]) {
+      handler({
+        runId: "run-3",
+        seq: 1,
+        stream: "assistant",
+        ts: Date.now(),
+        data: { text },
+      });
+    }
+    emitLifecycleEnd(handler, "run-3");
+
+    const payload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
+    expect(payload.message).toBeUndefined();
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
+    nowSpy?.mockRestore();
+  });
+
+  it("keeps final short replies like 'No' even when lead-fragment deltas are suppressed", () => {
+    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+      now: 2_200,
+    });
+    chatRunState.registry.add("run-4", { sessionKey: "session-4", clientRunId: "client-4" });
+
+    handler({
+      runId: "run-4",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "No" },
+    });
+    emitLifecycleEnd(handler, "run-4");
+
+    const payload = expectSingleFinalChatPayload(broadcast) as {
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(payload.message?.content?.[0]?.text).toBe("No");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
+    nowSpy?.mockRestore();
+  });
+
+  it("flushes buffered text as delta before final when throttle suppresses the latest chunk", () => {
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-flush", {
+      sessionKey: "session-flush",
+      clientRunId: "client-flush",
+    });
+
+    handler({
+      runId: "run-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Hello" },
+    });
+
+    now = 10_100;
+    handler({
+      runId: "run-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Hello world" },
+    });
+
+    emitLifecycleEnd(handler, "run-flush");
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(3);
+    const firstPayload = chatCalls[0]?.[1] as { state?: string };
+    const secondPayload = chatCalls[1]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    const thirdPayload = chatCalls[2]?.[1] as { state?: string };
+    expect(firstPayload.state).toBe("delta");
+    expect(secondPayload.state).toBe("delta");
+    expect(secondPayload.message?.content?.[0]?.text).toBe("Hello world");
+    expect(thirdPayload.state).toBe("final");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
+  });
+
+  it("preserves pre-tool assistant text when later segments stream as non-prefix snapshots", () => {
+    let now = 10_500;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-segmented", {
+      sessionKey: "session-segmented",
+      clientRunId: "client-segmented",
+    });
+
+    handler({
+      runId: "run-segmented",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Before tool call", delta: "Before tool call" },
+    });
+
+    now = 10_700;
+    handler({
+      runId: "run-segmented",
+      seq: 2,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "After tool call", delta: "\nAfter tool call" },
+    });
+
+    emitLifecycleEnd(handler, "run-segmented", 3);
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(3);
+    const secondPayload = chatCalls[1]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    const finalPayload = chatCalls[2]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(secondPayload.state).toBe("delta");
+    expect(secondPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(finalPayload.state).toBe("final");
+    expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
+  });
+
+  it("flushes merged segmented text before final when latest segment is throttled", () => {
+    let now = 10_800;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-segmented-flush", {
+      sessionKey: "session-segmented-flush",
+      clientRunId: "client-segmented-flush",
+    });
+
+    handler({
+      runId: "run-segmented-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Before tool call", delta: "Before tool call" },
+    });
+
+    now = 10_860;
+    handler({
+      runId: "run-segmented-flush",
+      seq: 2,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "After tool call", delta: "\nAfter tool call" },
+    });
+
+    emitLifecycleEnd(handler, "run-segmented-flush", 3);
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(3);
+    const flushPayload = chatCalls[1]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    const finalPayload = chatCalls[2]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(flushPayload.state).toBe("delta");
+    expect(flushPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(finalPayload.state).toBe("final");
+    expect(finalPayload.message?.content?.[0]?.text).toBe("Before tool call\nAfter tool call");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
+  });
+
+  it("does not flush an extra delta when the latest text already broadcast", () => {
+    let now = 11_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("run-no-dup-flush", {
+      sessionKey: "session-no-dup-flush",
+      clientRunId: "client-no-dup-flush",
+    });
+
+    handler({
+      runId: "run-no-dup-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Hello" },
+    });
+
+    now = 11_200;
+    handler({
+      runId: "run-no-dup-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Hello world" },
+    });
+
+    emitLifecycleEnd(handler, "run-no-dup-flush");
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(3);
+    expect(chatCalls.map(([, payload]) => (payload as { state?: string }).state)).toEqual([
+      "delta",
+      "delta",
+      "final",
+    ]);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+    nowSpy.mockRestore();
   });
 
   it("cleans up agent run sequence tracking when lifecycle completes", () => {
@@ -181,6 +485,114 @@ describe("agent event handler", () => {
     expect(agentRunSeq.has("run-cleanup")).toBe(false);
     expect(agentRunSeq.has("client-cleanup")).toBe(false);
     nowSpy?.mockRestore();
+  });
+
+  it("drops stale events that arrive after lifecycle completion", () => {
+    const { broadcast, nodeSendToSession, chatRunState, handler, nowSpy } = createHarness({
+      now: 2_500,
+    });
+    chatRunState.registry.add("run-stale-tail", {
+      sessionKey: "session-stale-tail",
+      clientRunId: "client-stale-tail",
+    });
+
+    handler({
+      runId: "run-stale-tail",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "done" },
+    });
+    emitLifecycleEnd(handler, "run-stale-tail");
+    const errorCallsBeforeStaleEvent = broadcast.mock.calls.filter(
+      ([event, payload]) =>
+        event === "agent" && (payload as { stream?: string }).stream === "error",
+    ).length;
+    const sessionChatCallsBeforeStaleEvent = sessionChatCalls(nodeSendToSession).length;
+
+    handler({
+      runId: "run-stale-tail",
+      seq: 3,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "late tail" },
+    });
+
+    const errorCalls = broadcast.mock.calls.filter(
+      ([event, payload]) =>
+        event === "agent" && (payload as { stream?: string }).stream === "error",
+    );
+    expect(errorCalls).toHaveLength(errorCallsBeforeStaleEvent);
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(sessionChatCallsBeforeStaleEvent);
+    nowSpy?.mockRestore();
+  });
+
+  it("flushes buffered chat delta before tool start events", () => {
+    let now = 12_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const {
+      broadcast,
+      broadcastToConnIds,
+      nodeSendToSession,
+      chatRunState,
+      toolEventRecipients,
+      handler,
+    } = createHarness({
+      resolveSessionKeyForRun: () => "session-tool-flush",
+    });
+
+    chatRunState.registry.add("run-tool-flush", {
+      sessionKey: "session-tool-flush",
+      clientRunId: "client-tool-flush",
+    });
+    registerAgentRunContext("run-tool-flush", {
+      sessionKey: "session-tool-flush",
+      verboseLevel: "off",
+    });
+    toolEventRecipients.add("run-tool-flush", "conn-1");
+
+    handler({
+      runId: "run-tool-flush",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Before tool" },
+    });
+
+    // Throttled assistant update (within 150ms window).
+    now = 12_050;
+    handler({
+      runId: "run-tool-flush",
+      seq: 2,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Before tool expanded" },
+    });
+
+    handler({
+      runId: "run-tool-flush",
+      seq: 3,
+      stream: "tool",
+      ts: Date.now(),
+      data: { phase: "start", name: "read", toolCallId: "tool-flush-1" },
+    });
+
+    const chatCalls = chatBroadcastCalls(broadcast);
+    expect(chatCalls).toHaveLength(2);
+    const flushedPayload = chatCalls[1]?.[1] as {
+      state?: string;
+      message?: { content?: Array<{ text?: string }> };
+    };
+    expect(flushedPayload.state).toBe("delta");
+    expect(flushedPayload.message?.content?.[0]?.text).toBe("Before tool expanded");
+    expect(sessionChatCalls(nodeSendToSession)).toHaveLength(2);
+
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    const flushCallOrder = broadcast.mock.invocationCallOrder[1] ?? 0;
+    const toolCallOrder = broadcastToConnIds.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER;
+    expect(flushCallOrder).toBeLessThan(toolCallOrder);
+    nowSpy.mockRestore();
+    resetAgentRunContextForTest();
   });
 
   it("routes tool events only to registered recipients when verbose is enabled", () => {
@@ -225,6 +637,107 @@ describe("agent event handler", () => {
     // But node/channel subscribers should NOT receive when verbose is off
     const nodeToolCalls = nodeSendToSession.mock.calls.filter(([, event]) => event === "agent");
     expect(nodeToolCalls).toHaveLength(0);
+    resetAgentRunContextForTest();
+  });
+
+  it("mirrors tool events to session subscribers so late-joining operator UIs can render them", () => {
+    const { broadcastToConnIds, sessionEventSubscribers, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-1",
+    });
+
+    registerAgentRunContext("run-session-tool", { sessionKey: "session-1", verboseLevel: "off" });
+    sessionEventSubscribers.subscribe("conn-session");
+
+    handler({
+      runId: "run-session-tool",
+      seq: 1,
+      stream: "tool",
+      ts: 1_234,
+      data: {
+        phase: "start",
+        name: "exec",
+        toolCallId: "tool-session-1",
+        args: { command: "echo hi" },
+      },
+    });
+
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    expect(broadcastToConnIds).toHaveBeenCalledWith(
+      "session.tool",
+      expect.objectContaining({
+        runId: "run-session-tool",
+        sessionKey: "session-1",
+        stream: "tool",
+        ts: 1_234,
+        data: expect.objectContaining({
+          phase: "start",
+          name: "exec",
+          toolCallId: "tool-session-1",
+          args: { command: "echo hi" },
+        }),
+      }),
+      new Set(["conn-session"]),
+      { dropIfSlow: true },
+    );
+    resetAgentRunContextForTest();
+  });
+
+  it("broadcasts terminal session status to session subscribers on lifecycle end", () => {
+    const { broadcastToConnIds, sessionEventSubscribers, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-finished",
+    });
+
+    sessionEventSubscribers.subscribe("conn-session");
+    registerAgentRunContext("run-finished", {
+      sessionKey: "session-finished",
+      verboseLevel: "off",
+    });
+
+    handler({
+      runId: "run-finished",
+      seq: 1,
+      stream: "lifecycle",
+      ts: 1_000,
+      data: {
+        phase: "start",
+        startedAt: 900,
+      },
+    });
+    handler({
+      runId: "run-finished",
+      seq: 2,
+      stream: "lifecycle",
+      ts: 1_800,
+      data: {
+        phase: "end",
+        startedAt: 900,
+        endedAt: 1_700,
+      },
+    });
+
+    const sessionsChangedCalls = broadcastToConnIds.mock.calls.filter(
+      ([event]) => event === "sessions.changed",
+    );
+    expect(sessionsChangedCalls).toHaveLength(2);
+    expect(sessionsChangedCalls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        sessionKey: "session-finished",
+        phase: "end",
+        status: "done",
+        startedAt: 900,
+        endedAt: 1_700,
+        runtimeMs: 800,
+        updatedAt: 1_700,
+        abortedLastRun: false,
+      }),
+    );
+    expect(persistGatewaySessionLifecycleEventMock).toHaveBeenCalledWith({
+      sessionKey: "session-finished",
+      event: expect.objectContaining({
+        runId: "run-finished",
+        data: expect.objectContaining({ phase: "end" }),
+      }),
+    });
     resetAgentRunContextForTest();
   });
 
@@ -290,28 +803,10 @@ describe("agent event handler", () => {
       resolveSessionKeyForRun: () => "session-fallback",
     });
 
-    handler({
-      runId: "run-fallback",
-      seq: 1,
-      stream: "lifecycle",
-      ts: Date.now(),
-      data: {
-        phase: "fallback",
-        selectedProvider: "fireworks",
-        selectedModel: "fireworks/minimax-m2p5",
-        activeProvider: "deepinfra",
-        activeModel: "moonshotai/Kimi-K2.5",
-      },
-    });
+    emitFallbackLifecycle({ handler, runId: "run-fallback" });
 
     expect(broadcastToConnIds).not.toHaveBeenCalled();
-    const broadcastAgentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
-    expect(broadcastAgentCalls).toHaveLength(1);
-    const payload = broadcastAgentCalls[0]?.[1] as {
-      sessionKey?: string;
-      stream?: string;
-      data?: Record<string, unknown>;
-    };
+    const payload = expectSingleAgentBroadcastPayload(broadcast);
     expect(payload.stream).toBe("lifecycle");
     expect(payload.data?.phase).toBe("fallback");
     expect(payload.sessionKey).toBe("session-fallback");
@@ -330,28 +825,9 @@ describe("agent event handler", () => {
       clientRunId: "run-fallback-client",
     });
 
-    handler({
-      runId: "run-fallback-internal",
-      seq: 1,
-      stream: "lifecycle",
-      ts: Date.now(),
-      data: {
-        phase: "fallback",
-        selectedProvider: "fireworks",
-        selectedModel: "fireworks/minimax-m2p5",
-        activeProvider: "deepinfra",
-        activeModel: "moonshotai/Kimi-K2.5",
-      },
-    });
+    emitFallbackLifecycle({ handler, runId: "run-fallback-internal" });
 
-    const broadcastAgentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
-    expect(broadcastAgentCalls).toHaveLength(1);
-    const payload = broadcastAgentCalls[0]?.[1] as {
-      runId?: string;
-      sessionKey?: string;
-      stream?: string;
-      data?: Record<string, unknown>;
-    };
+    const payload = expectSingleAgentBroadcastPayload(broadcast);
     expect(payload.runId).toBe("run-fallback-client");
     expect(payload.stream).toBe("lifecycle");
     expect(payload.data?.phase).toBe("fallback");
@@ -362,29 +838,41 @@ describe("agent event handler", () => {
     expect(nodePayload.runId).toBe("run-fallback-client");
   });
 
+  it("suppresses chat and node session events for non-control-UI-visible runs", () => {
+    const { broadcast, nodeSendToSession, handler } = createHarness({
+      resolveSessionKeyForRun: () => "session-hidden",
+    });
+    registerAgentRunContext("run-hidden", {
+      sessionKey: "session-hidden",
+      isControlUiVisible: false,
+      verboseLevel: "off",
+    });
+
+    handler({
+      runId: "run-hidden",
+      seq: 1,
+      stream: "assistant",
+      ts: Date.now(),
+      data: { text: "Reply from imessage" },
+    });
+    emitLifecycleEnd(handler, "run-hidden", 2);
+
+    expect(chatBroadcastCalls(broadcast)).toHaveLength(0);
+    expect(nodeSendToSession).not.toHaveBeenCalled();
+  });
+
   it("uses agent event sessionKey when run-context lookup cannot resolve", () => {
     const { broadcast, handler } = createHarness({
       resolveSessionKeyForRun: () => undefined,
     });
 
-    handler({
+    emitFallbackLifecycle({
+      handler,
       runId: "run-fallback-session-key",
-      seq: 1,
-      stream: "lifecycle",
-      ts: Date.now(),
       sessionKey: "session-from-event",
-      data: {
-        phase: "fallback",
-        selectedProvider: "fireworks",
-        selectedModel: "fireworks/minimax-m2p5",
-        activeProvider: "deepinfra",
-        activeModel: "moonshotai/Kimi-K2.5",
-      },
     });
 
-    const broadcastAgentCalls = broadcast.mock.calls.filter(([event]) => event === "agent");
-    expect(broadcastAgentCalls).toHaveLength(1);
-    const payload = broadcastAgentCalls[0]?.[1] as { sessionKey?: string };
+    const payload = expectSingleAgentBroadcastPayload(broadcast);
     expect(payload.sessionKey).toBe("session-from-event");
   });
 
@@ -449,18 +937,9 @@ describe("agent event handler", () => {
     expect(chatBroadcastCalls(broadcast)).toHaveLength(0);
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(0);
 
-    handler({
-      runId: "run-heartbeat",
-      seq: 2,
-      stream: "lifecycle",
-      ts: Date.now(),
-      data: { phase: "end" },
-    });
+    emitLifecycleEnd(handler, "run-heartbeat");
 
-    const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(1);
-    const finalPayload = chatCalls[0]?.[1] as { state?: string; message?: unknown };
-    expect(finalPayload.state).toBe("final");
+    const finalPayload = expectSingleFinalChatPayload(broadcast) as { message?: unknown };
     expect(finalPayload.message).toBeUndefined();
     expect(sessionChatCalls(nodeSendToSession)).toHaveLength(1);
   });
@@ -491,21 +970,11 @@ describe("agent event handler", () => {
       },
     });
 
-    handler({
-      runId: "run-heartbeat-alert",
-      seq: 2,
-      stream: "lifecycle",
-      ts: Date.now(),
-      data: { phase: "end" },
-    });
+    emitLifecycleEnd(handler, "run-heartbeat-alert");
 
-    const chatCalls = chatBroadcastCalls(broadcast);
-    expect(chatCalls).toHaveLength(1);
-    const payload = chatCalls[0]?.[1] as {
-      state?: string;
+    const payload = expectSingleFinalChatPayload(broadcast) as {
       message?: { content?: Array<{ text?: string }> };
     };
-    expect(payload.state).toBe("final");
     expect(payload.message?.content?.[0]?.text).toBe(
       "Disk usage crossed 95 percent on /data and needs cleanup now.",
     );

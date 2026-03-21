@@ -184,8 +184,11 @@ export async function buildGatewayTaskSystem(params: {
       runAgentTurn,
     });
 
-    pluginRegistry.httpHandlers.push({
+    pluginRegistry.httpRoutes.push({
       pluginId: "openclaw-task-api",
+      path: "/api",
+      auth: "gateway",
+      match: "prefix",
       handler: handleApiRequest,
       source: "server-tasks.ts",
     });

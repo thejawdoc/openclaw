@@ -31,7 +31,7 @@ Local checkout (when running from a git repo):
 openclaw plugins install ./extensions/line
 ```
 
-## Onboarding
+## Setup
 
 1. Create a LINE Developers account and open the Console:
    [https://developers.line.biz/console/](https://developers.line.biz/console/)
@@ -48,7 +48,12 @@ The gateway responds to LINE’s webhook verification (GET) and inbound events (
 If you need a custom path, set `channels.line.webhookPath` or
 `channels.line.accounts.<id>.webhookPath` and update the URL accordingly.
 
-## Configuration
+Security note:
+
+- LINE signature verification is body-dependent (HMAC over the raw body), so OpenClaw applies strict pre-auth body limits and timeout before verification.
+- OpenClaw processes webhook events from the verified raw request bytes. Upstream middleware-transformed `req.body` values are ignored for signature-integrity safety.
+
+## Configure
 
 Minimal config:
 
@@ -82,6 +87,8 @@ Token/secret files:
   },
 }
 ```
+
+`tokenFile` and `secretFile` must point to regular files. Symlinks are rejected.
 
 Multiple accounts:
 
@@ -118,6 +125,7 @@ Allowlists and policies:
 - `channels.line.groupPolicy`: `allowlist | open | disabled`
 - `channels.line.groupAllowFrom`: allowlisted LINE user IDs for groups
 - Per-group overrides: `channels.line.groups.<groupId>.allowFrom`
+- Runtime note: if `channels.line` is completely missing, runtime falls back to `groupPolicy="allowlist"` for group checks (even if `channels.defaults.groupPolicy` is set).
 
 LINE IDs are case-sensitive. Valid IDs look like:
 

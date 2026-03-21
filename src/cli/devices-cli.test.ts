@@ -287,19 +287,46 @@ describe("devices cli local fallback", () => {
   });
 });
 
+describe("devices cli list", () => {
+  it("renders pending scopes when present", async () => {
+    callGateway.mockResolvedValueOnce({
+      pending: [
+        {
+          requestId: "req-1",
+          deviceId: "device-1",
+          displayName: "Device One",
+          role: "operator",
+          scopes: ["operator.admin", "operator.read"],
+          ts: 1,
+        },
+      ],
+      paired: [],
+    });
+
+    await runDevicesCommand(["list"]);
+
+    const output = runtime.log.mock.calls.map((entry) => String(entry[0] ?? "")).join("\n");
+    expect(output).toContain("Scopes");
+    expect(output).toContain("operator.admin, operator.read");
+  });
+});
+
 afterEach(() => {
-  callGateway.mockReset();
-  buildGatewayConnectionDetails.mockReset();
+  callGateway.mockClear();
+  buildGatewayConnectionDetails.mockClear();
   buildGatewayConnectionDetails.mockReturnValue({
     url: "ws://127.0.0.1:18789",
     urlSource: "local loopback",
     message: "",
   });
-  listDevicePairing.mockReset();
-  approveDevicePairing.mockReset();
-  summarizeDeviceTokens.mockReset();
+  listDevicePairing.mockClear();
+  listDevicePairing.mockResolvedValue({ pending: [], paired: [] });
+  approveDevicePairing.mockClear();
+  approveDevicePairing.mockResolvedValue(undefined);
+  summarizeDeviceTokens.mockClear();
+  summarizeDeviceTokens.mockReturnValue(undefined);
   withProgress.mockClear();
-  runtime.log.mockReset();
-  runtime.error.mockReset();
-  runtime.exit.mockReset();
+  runtime.log.mockClear();
+  runtime.error.mockClear();
+  runtime.exit.mockClear();
 });
