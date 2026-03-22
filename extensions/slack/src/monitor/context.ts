@@ -62,6 +62,7 @@ export type SlackMonitorContext = {
 
   logger: ReturnType<typeof getChildLogger>;
   markMessageSeen: (channelId: string | undefined, ts?: string) => boolean;
+  recordMessageSeen: (channelId: string | undefined, ts?: string) => void;
   shouldDropMismatchedSlackEvent: (body: unknown) => boolean;
   resolveSlackSystemEventSessionKey: (params: {
     channelId?: string | null;
@@ -123,6 +124,7 @@ export function createSlackMonitorContext(params: {
   typingReaction: string;
   mediaMaxBytes: number;
   removeAckAfterReply: boolean;
+  recordMessageSeen?: SlackMonitorContext["recordMessageSeen"];
 }): SlackMonitorContext {
   const channelHistories = new Map<string, HistoryEntry[]>();
   const logger = getChildLogger({ module: "slack-auto-reply" });
@@ -152,6 +154,11 @@ export function createSlackMonitorContext(params: {
     }
     return seenMessages.check(`${channelId}:${ts}`);
   };
+  const recordMessageSeen =
+    params.recordMessageSeen ??
+    (() => {
+      // Optional persistent watermark hook supplied by the provider.
+    });
 
   const resolveSlackSystemEventSessionKey = (p: {
     channelId?: string | null;
@@ -437,6 +444,7 @@ export function createSlackMonitorContext(params: {
     removeAckAfterReply: params.removeAckAfterReply,
     logger,
     markMessageSeen,
+    recordMessageSeen,
     shouldDropMismatchedSlackEvent,
     resolveSlackSystemEventSessionKey,
     isChannelAllowed,

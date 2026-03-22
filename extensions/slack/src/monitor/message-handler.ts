@@ -232,6 +232,7 @@ export function createSlackMessageHandler(params: {
         return;
       }
     }
+    ctx.recordMessageSeen?.(message.channel, message.ts);
     trackEvent?.();
     const resolvedMessage = await threadTsResolver.resolve({ message, source: opts.source });
     const debounceKey = buildSlackDebounceKey(resolvedMessage, ctx.accountId);

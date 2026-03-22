@@ -32,6 +32,7 @@ import { resolveSlackChannelAllowlist } from "../resolve-channels.js";
 import { resolveSlackUserAllowlist } from "../resolve-users.js";
 import { resolveSlackAppToken, resolveSlackBotToken } from "../token.js";
 import { normalizeAllowList } from "./allow-list.js";
+import { createSlackHistoryCatchup } from "./catchup.js";
 import { resolveSlackSlashCommandConfig } from "./commands.js";
 import { createSlackMonitorContext } from "./context.js";
 import { registerSlackMonitorEvents } from "./events.js";
@@ -293,10 +294,14 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
         }
       : null;
   let unregisterHttpHandler: (() => void) | null = null;
+  let stopHistoryCatchup: (() => void) | null = null;
 
   let botUserId = "";
   let teamId = "";
   let apiAppId = "";
+  let recordMessageSeen = (_channelId: string | undefined, _ts?: string) => {
+    // wired after catchup state is initialized
+  };
   const expectedApiAppIdFromAppToken = parseApiAppIdFromAppToken(appToken);
   try {
     const auth = await app.client.auth.test({ token: botToken });
@@ -346,6 +351,9 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     typingReaction,
     mediaMaxBytes,
     removeAckAfterReply,
+    recordMessageSeen: (channelId, ts) => {
+      recordMessageSeen(channelId, ts);
+    },
   });
 
   // Wire up event liveness tracking: update lastEventAt on every inbound event
@@ -483,6 +491,15 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
           reconnectAttempts = 0;
           publishSlackConnectedStatus(opts.setStatus);
           runtime.log?.("slack socket mode connected");
+          const historyCatchup = await createSlackHistoryCatchup({
+            ctx,
+            account,
+            handleSlackMessage,
+          });
+          recordMessageSeen = historyCatchup.recordSeen;
+          await historyCatchup.runOnce();
+          historyCatchup.schedule();
+          stopHistoryCatchup = historyCatchup.stop;
         } catch (err) {
           // Auth errors (account_inactive, invalid_auth, etc.) are permanent —
           // retrying will never succeed and blocks the entire gateway.  Fail fast.
@@ -520,6 +537,11 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
           break;
         }
         publishSlackDisconnectedStatus(opts.setStatus, disconnect.error);
+        stopHistoryCatchup?.();
+        stopHistoryCatchup = null;
+        recordMessageSeen = (_channelId: string | undefined, _ts?: string) => {
+          // no-op until catchup is reinitialized after reconnect
+        };
 
         // Bail immediately on non-recoverable auth errors during reconnect too.
         if (disconnect.error && isNonRecoverableSlackAuthError(disconnect.error)) {
@@ -566,6 +588,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     }
   } finally {
     opts.abortSignal?.removeEventListener("abort", stopOnAbort);
+    stopHistoryCatchup?.();
     unregisterHttpHandler?.();
     await app.stop().catch(() => undefined);
   }
