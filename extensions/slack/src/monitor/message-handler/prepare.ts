@@ -775,9 +775,12 @@ export async function prepareSlackMessage(params: {
     },
   });
 
-  const replyTarget = ctxPayload.To ?? undefined;
+  const replyTarget = ctxPayload.To ?? slackTo ?? undefined;
   if (!replyTarget) {
     return null;
+  }
+  if (!ctxPayload.To) {
+    ctxPayload.To = replyTarget;
   }
 
   if (shouldLogVerbose()) {

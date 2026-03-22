@@ -18,12 +18,13 @@ describe("createSlackHistoryCatchup", () => {
   it("dispatches recent human-authored channel messages and persists watermarks", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-slack-catchup-"));
     process.env.OPENCLAW_STATE_DIR = stateDir;
+    const ts = `${(Date.now() / 1000 - 5).toFixed(6)}`;
 
     const history = vi.fn().mockResolvedValue({
       messages: [
         {
           type: "message",
-          ts: "1774154476.836759",
+          ts,
           text: "hello from slack",
           user: "U123",
         },
@@ -76,16 +77,17 @@ describe("createSlackHistoryCatchup", () => {
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
       channels: Record<string, string>;
     };
-    expect(state.channels.C123).toBe("1774154476.836759");
+    expect(state.channels.C123).toBe(ts);
   });
 
   it("does not redispatch messages already covered by the persisted watermark", async () => {
     const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-slack-catchup-"));
     process.env.OPENCLAW_STATE_DIR = stateDir;
     await fs.mkdir(path.join(stateDir, "state", "slack-catchup"), { recursive: true });
+    const ts = `${(Date.now() / 1000 - 5).toFixed(6)}`;
     await fs.writeFile(
       path.join(stateDir, "state", "slack-catchup", "archon.json"),
-      JSON.stringify({ channels: { C123: "1774154476.836759" } }),
+      JSON.stringify({ channels: { C123: ts } }),
       "utf8",
     );
 
@@ -93,7 +95,7 @@ describe("createSlackHistoryCatchup", () => {
       messages: [
         {
           type: "message",
-          ts: "1774154476.836759",
+          ts,
           text: "already seen",
           user: "U123",
         },

@@ -92,6 +92,21 @@ describe("resolveSlackChannelConfig", () => {
     expect(res).toMatchObject({ allowed: false, requireMention: true });
   });
 
+  it("allows explicit #channel-name keys without enabling broad name matching", () => {
+    const res = resolveSlackChannelConfig({
+      channelId: "C1",
+      channelName: "ops-room",
+      channels: { "#ops-room": { allow: true, requireMention: false } },
+      defaultRequireMention: true,
+    });
+    expect(res).toMatchObject({
+      allowed: true,
+      requireMention: false,
+      matchKey: "#ops-room",
+      matchSource: "direct",
+    });
+  });
+
   it("allows channel-name route matches when dangerous name matching is enabled", () => {
     const res = resolveSlackChannelConfig({
       channelId: "C1",

@@ -105,6 +105,8 @@ export function resolveSlackChannelConfig(params: {
   const keys = channelKeys ?? Object.keys(entries);
   const normalizedName = channelName ? normalizeSlackSlug(channelName) : "";
   const directName = channelName ? channelName.trim() : "";
+  const hashedNormalizedName = normalizedName ? `#${normalizedName}` : undefined;
+  const hashedDirectName = directName ? `#${directName}` : undefined;
   // Slack always delivers channel IDs in uppercase (e.g. C0ABC12345) but
   // operators commonly write them in lowercase in their config. Add both
   // case variants so the lookup is case-insensitive without requiring a full
@@ -115,6 +117,8 @@ export function resolveSlackChannelConfig(params: {
     channelId,
     channelIdLower !== channelId ? channelIdLower : undefined,
     channelIdUpper !== channelId ? channelIdUpper : undefined,
+    hashedNormalizedName,
+    hashedDirectName,
     allowNameMatching ? (channelName ? `#${directName}` : undefined) : undefined,
     allowNameMatching ? directName : undefined,
     allowNameMatching ? normalizedName : undefined,
