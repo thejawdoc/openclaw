@@ -142,24 +142,38 @@ export async function createSlackHistoryCatchup(params: {
       });
       const rawMessages = Array.isArray(history.messages) ? history.messages : [];
       const messages = rawMessages
-        .filter((item): item is SlackMessageEvent & { ts: string } => {
-          const ts = normalizeSlackTs((item as { ts?: string }).ts);
-          const subtype = typeof item.subtype === "string" ? item.subtype : "";
-          return Boolean(
-            ts &&
-            Number(ts) > oldestNumber &&
-            item.type === "message" &&
-            typeof item.user === "string" &&
-            item.user.length > 0 &&
-            !item.bot_id &&
-            (!subtype || subtype === "file_share"),
-          );
+        .map((item) => {
+          const candidate = item as Partial<SlackMessageEvent>;
+          const ts = normalizeSlackTs(candidate.ts);
+          const subtype = typeof candidate.subtype === "string" ? candidate.subtype : "";
+          const user = typeof candidate.user === "string" ? candidate.user : "";
+          if (
+            !ts ||
+            Number(ts) <= oldestNumber ||
+            candidate.type !== "message" ||
+            !user ||
+            candidate.bot_id ||
+            (subtype && subtype !== "file_share")
+          ) {
+            return null;
+          }
+          return {
+            candidate,
+            ts,
+            user,
+          };
         })
+        .filter((item): item is { candidate: Partial<SlackMessageEvent>; ts: string; user: string } =>
+          item !== null,
+        )
         .sort((a, b) => Number(a.ts) - Number(b.ts));
       for (const message of messages) {
-        const event: SlackMessageEvent = {
-          ...message,
+        const event = {
+          ...(message.candidate as SlackMessageEvent),
+          type: "message" as const,
           channel: channelId,
+          ts: message.ts,
+          user: message.user,
         };
         await params.handleSlackMessage(event, { source: "message" });
         recordSeen(channelId, message.ts);
